@@ -34,7 +34,7 @@ Statut : **audit logiciel validé ; release bloquée jusqu’aux tests WebUI et 
 - [x] compilation `m5stack-cplus2` réussie après corrections (RAM globale 34,7 %, flash 51,8 %) ;
 - [x] `git diff --check` sans erreur ;
 - [x] recherche de secrets sans résultat réel dans l’arbre de travail, hors `.git`, `.pio` et binaires ;
-- [x] binaire généré (4 414 016 octets), SHA-256 `f7854c2f291f9866ce2407b841107145a74cad711b55da373b57e8d442848989` ;
+- [x] binaire final généré après correction de navigation (4 414 960 octets), SHA-256 `02a15cea1ce713238edd2c3b1ca2553b61ef9dfbc2482874f3d5f0315f653a84` ;
 - [ ] test de connexion WebUI avec invalidation des anciennes sessions ;
 - [ ] test matériel CAN en écoute seule puis déverrouillage physique ;
 - [ ] tag et release créés uniquement après validation des cases précédentes.

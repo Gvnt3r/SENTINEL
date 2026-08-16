@@ -27,6 +27,9 @@
 > [!CAUTION]
 > Utilisez les fonctions radio, automobile et d’émission uniquement sur votre propre matériel ou avec une autorisation explicite. Le CAN TX démarre verrouillé et exige une confirmation physique.
 
+> [!IMPORTANT]
+> **Responsabilité de l’utilisateur —** SENTINEL est fourni à des fins de recherche, de diagnostic et d’apprentissage, sans garantie d’aucune sorte. Vous êtes seul responsable de son installation, de son branchement et de son utilisation. Les auteurs, contributeurs et projets cités ne pourront être tenus responsables d’un dommage matériel ou logiciel, d’une perte de données, d’une immobilisation, d’un accident ou de toute conséquence résultant d’une utilisation incorrecte, imprudente, illégale ou non autorisée. N’utilisez jamais les fonctions d’émission sur un véhicule en circulation ou sur un système critique. Respectez la législation locale et travaillez d’abord sur un banc isolé.
+
 ## ◆ Ce que le fork apporte
 
 - boot **SENTINEL** et animation automobile, sans l’ancien visuel Bruce ;
@@ -153,6 +156,8 @@ src/
 - écritures de scénarios atomiques avec restauration.
 
 Consultez la [politique de sécurité](SECURITY.md) et le [rapport d’audit v0.1-beta](docs/SECURITY_AUDIT_v0.1-beta.md). Signalez les vulnérabilités de manière privée conformément à cette politique.
+
+L’état courant et la checklist de reprise sont disponibles dans le document [Avancement v0.1-beta](docs/AVANCEMENT.md).
 
 ## △ Feuille de route
 
