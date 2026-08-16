@@ -1136,7 +1136,7 @@ $(".act-save-credential").addEventListener("click", async (e) => {
   }
 
   Dialog.loading.show("Saving WiFi Credentials...");
-  await requestGet("/wifi", {
+  await requestPost("/wifi", {
     usr: username,
     pwd: password,
   });
@@ -1174,7 +1174,7 @@ $(".act-reboot").addEventListener("click", async (e) => {
   e.preventDefault();
   if (!confirm("Are you sure you want to REBOOT the device?")) return;
   Dialog.loading.show("Rebooting...");
-  await requestGet("/reboot");
+  await requestPost("/reboot", {});
   setTimeout(() => {
     location.reload();
   }, 1000);

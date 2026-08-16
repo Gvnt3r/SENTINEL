@@ -990,7 +990,7 @@ void drawStatusBar() {
         tft.print(timeStr);
     } else {
         setTftDisplay(12, 12, bruceConfig.priColor, 1, bruceConfig.bgColor);
-        tft.print("BRUCE " + String(BRUCE_VERSION));
+        tft.print(String(BRUCE_VERSION));
     }
 
     int iconCount = 0;

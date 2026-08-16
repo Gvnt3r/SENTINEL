@@ -30,7 +30,7 @@ Les fonctions générales provenant de Bruce restent disponibles, mais l’inter
 
 ## Suite CAN automobile
 
-SENTINEL introduit une couche CAN autonome autour d’un adaptateur UART compatible Lawicel/SLCAN :
+SENTINEL introduit une couche CAN autonome multi-backend : contrôleur ESP32 TWAI avec transceiver externe, ou adaptateur UART compatible Lawicel/SLCAN :
 
 - trames CAN classiques standard 11 bits et étendues 29 bits ;
 - trames de données et RTR, DLC de 0 à 8 ;
@@ -43,6 +43,8 @@ SENTINEL introduit une couche CAN autonome autour d’un adaptateur UART compati
 - filtres persistants dans `/Automotive/filters.json` ;
 - scénarios JSON avec écriture atomique dans `/Automotive/scenarios/` ;
 - validation des IDs, DLC, données, délais et répétitions côté firmware.
+- démarrage en écoute seule et déverrouillage TX physique par appui long ;
+- diagnostic ELM327 Bluetooth Classic séparé du CAN brut : PID moteur, vitesse, température et DTC.
 
 CAN-FD, ISO-TP, UDS et DBC ne sont pas encore pris en charge.
 
@@ -61,6 +63,9 @@ Les routes CAN réutilisent l’authentification de la WebUI :
 ```text
 GET    /api/can/status
 GET    /api/can/ids
+GET    /api/can/config
+POST   /api/can/config
+POST   /api/can/lock
 POST   /api/can/send
 GET    /api/can/scenarios
 POST   /api/can/scenario
@@ -70,7 +75,10 @@ DELETE /api/can/scenario
 ## Matériel ciblé
 
 - M5Stack M5StickC Plus2 ;
-- adaptateur UART Lawicel/SLCAN à 115200 bauds ;
+- transceiver CAN classique 3,3 V, de préférence isolé, pour ESP32 TWAI ;
+- ou adaptateur UART Lawicel/SLCAN à 115200 bauds ;
+- ELM327 Bluetooth Classic facultatif pour le diagnostic OBD-II ;
+- CANable facultatif comme outil compagnon sur ordinateur ;
 - logique UART 3,3 V ;
 - carte microSD pour les captures et scénarios ;
 - Proxmark3 RDV4 facultatif.
@@ -85,6 +93,8 @@ DELETE /api/can/scenario
 
 Le port Grove est une ressource partagée : CAN et Proxmark ne doivent pas l’utiliser simultanément.
 
+Le guide [Matériel CAN et OBD-II](docs/CAN_HARDWARE.md) décrit le câblage TWAI/SLCAN, le câble OBD-II passif, ELM327, CANable et les règles de sécurité. Le +12 V de la broche 16 OBD-II ne doit jamais être relié au Stick.
+
 ## Compiler
 
 Le projet utilise PlatformIO :
@@ -96,10 +106,10 @@ pio run -e m5stack-cplus2
 Le binaire fusionné est produit sous le nom :
 
 ```text
-Bruce-m5stack-cplus2.bin
+S¢ntïnel-v0.1-beta-m5stack-cplus2.bin
 ```
 
-Le nom du fichier reste temporairement hérité du système de build Bruce ; l’interface et le firmware affichent SENTINEL.
+Le nom de version officiel du firmware est **S¢ntïnel-v0.1-beta**. L’interface compacte conserve le logotype lisible **SENTINEL** sur l’écran du Stick.
 
 ## Flasher
 
@@ -109,7 +119,7 @@ Avec un M5StickC Plus2 connecté sur `/dev/ttyACM0` :
 pio run -e m5stack-cplus2 -t upload --upload-port /dev/ttyACM0
 ```
 
-La dernière version de développement a été validée avec environ 45,5 % de flash et 31 % de RAM globale.
+La taille exacte dépend des fonctions Bluetooth liées à la cible ; la compilation PlatformIO affiche l’usage réel de la flash et de la RAM avant flashage.
 
 ## Structure des ajouts
 
@@ -121,6 +131,7 @@ src/
 └── modules/
     ├── automotive/
     │   ├── can_suite.*
+    │   ├── elm327_service.*
     │   └── slcan_tools.*
     └── proxmark/
         └── proxmark_bridge.*

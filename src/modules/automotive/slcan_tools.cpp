@@ -2,6 +2,7 @@
 
 #include "can_suite.h"
 #include "core/display.h"
+#include "core/operation_control.h"
 #include "core/sd_functions.h"
 #include <SD.h>
 #include <globals.h>
@@ -34,7 +35,7 @@ void shell(const char *title, int page, int total, const char *action, bool conn
     tft.setTextColor(connected ? C_GREEN : C_AMBER, C_BG); tft.drawRightString(status, tftWidth - 6, 5, 1);
     tft.drawFastHLine(6, 20, tftWidth - 12, C_CYAN);
     tft.setTextColor(C_AMBER, C_BG); tft.drawString(String(page) + "/" + String(total), 7, tftHeight - 13, 1);
-    tft.setTextColor(C_CYAN, C_BG); tft.drawRightString(String("M5 ") + action, tftWidth - 7, tftHeight - 13, 1);
+    tft.setTextColor(C_CYAN, C_BG); tft.drawRightString(action, tftWidth - 7, tftHeight - 13, 1);
 }
 
 void ascHeader(File &file, uint32_t bitrate) {
@@ -53,12 +54,46 @@ void ascFrame(File &file, const CanFrame &frame, uint32_t origin) {
 }
 
 bool beginCan(uint32_t bitrate) {
-    if (adapter().connected()) adapter().end();
-    return adapter().begin(bitrate, BAD_RX, BAD_TX);
+    return startTransport(bitrate, BAD_RX, BAD_TX);
+}
+
+bool stopRequested(bool allowSelect = true) {
+    (void)allowSelect;
+    return operationExitRequested();
+}
+
+void armOperationStop() {
+    armOperationExit();
+}
+
+bool waitInterruptible(uint32_t durationUs) {
+    while (durationUs) {
+        if (stopRequested()) return false;
+        uint32_t slice = durationUs > 10000 ? 10000 : durationUs;
+        delayMicroseconds(slice);
+        durationUs -= slice;
+    }
+    return true;
+}
+
+bool confirmTxUnlock() {
+    shell("ATTENTION TX",5,7,"MAINTENIR M5",false);
+    tft.setTextSize(FP); tft.setTextColor(C_RED,C_BG); tft.setCursor(8,30);
+    tft.println("Emission sur bus CAN"); tft.println("Banc ou vehicule autorise");
+    tft.println("Maintenir M5 1.5 seconde"); tft.println("Power: annuler");
+    while (SelPress) delay(10);
+    uint32_t heldAt=0;
+    while (!check(EscPress)) {
+        if (SelPress) { if (!heldAt) heldAt=millis(); if (millis()-heldAt>=1500) return unlockTransmission(); }
+        else heldAt=0;
+        delay(10);
+    }
+    return false;
 }
 
 void drawLive(uint32_t bitrate, uint32_t frames, uint32_t started, const CanFrame *last, const String &path) {
-    shell("CAN CAPTURE", 4, 7, "STOP", adapter().connected());
+    CanTransportStatus state=transportStatus();
+    shell("CAN CAPTURE", 4, 7, "2x HAUT: STOP", state.connected);
     tft.setTextSize(FM); tft.setCursor(8, 28); tft.setTextColor(C_AMBER, C_BG);
     float rate = millis() == started ? 0 : frames * 1000.0f / (millis() - started);
     tft.printf("%lu k  %.1f tr/s\n", static_cast<unsigned long>(bitrate / 1000), rate);
@@ -67,28 +102,32 @@ void drawLive(uint32_t bitrate, uint32_t frames, uint32_t started, const CanFram
         tft.setTextColor(C_CYAN, C_BG); tft.printf("ID %s%lX DLC %u\n", last->extended ? "x" : "", static_cast<unsigned long>(last->id), last->dlc);
         for (uint8_t i=0;i<last->dlc;i++) { const CanIdStats *s=activity().find(last->id,last->extended); tft.setTextColor(s && (s->changedMask&(1U<<i)) ? C_AMBER : C_CYAN, C_BG); tft.printf("%02X ",last->data[i]); }
     }
-    tft.setTextSize(FP); tft.setTextColor(adapter().errors() ? C_RED : C_CYAN,C_BG); tft.setCursor(8,101); tft.print(path.substring(path.lastIndexOf('/')+1));
+    tft.setTextSize(FP); tft.setTextColor(state.errors ? C_RED : C_CYAN,C_BG); tft.setCursor(8,101); tft.print(String(transport().name())+" "+(state.listenOnly?"LISTEN ":"TX ")+path.substring(path.lastIndexOf('/')+1));
 }
 } // namespace
 
 namespace SlcanTools {
 
 void dashboard(uint32_t bitrate) {
-    if (!beginCan(bitrate)) { displayError(adapter().lastError(), true); return; }
+    if (!beginCan(bitrate)) { displayError(transportStatus().lastError, true); return; }
+    armOperationStop();
     uint32_t started=millis(), frames=0, drawAt=0; CanFrame frame, last; bool have=false;
-    while (!check(EscPress)) {
-        while (adapter().poll(frame)) { activity().update(frame); last=frame; have=true; frames++; }
+    while (!stopRequested()) {
+        for (uint8_t batch=0; batch<32 && transport().poll(frame); ++batch) {
+            activity().update(frame); last=frame; have=true; frames++;
+        }
         if (millis()-drawAt>200) { drawAt=millis(); drawLive(bitrate,frames,started,have?&last:nullptr,"LIVE"); }
         delay(1);
     }
-    adapter().end();
+    stopTransport();
 }
 
 void activeIds() {
+    armOperationStop();
     size_t index=0;
-    while (!check(EscPress)) {
+    while (!stopRequested(false)) {
         const auto &ids=activity().items(); if (!ids.empty()) { if (check(NextPress)) index=(index+1)%ids.size(); if (check(PrevPress)) index=(index+ids.size()-1)%ids.size(); }
-        shell("ACTIVE IDS",2,7,"DETAIL",adapter().connected()); tft.setCursor(8,29); tft.setTextSize(FM);
+        shell("ACTIVE IDS",2,7,"2x HAUT: RETOUR",transportStatus().connected); tft.setCursor(8,29); tft.setTextSize(FM);
         if (ids.empty()) { tft.setTextColor(C_CYAN,C_BG); tft.println("Aucune trame"); }
         else { const auto &s=ids[index]; tft.setTextColor(C_CYAN,C_BG); tft.printf("%s%lX  %lu\n",s.extended?"x":"",(unsigned long)s.id,(unsigned long)s.count); tft.printf("%.1f Hz mask %02X\n",s.frequencyHz,s.changedMask); for(uint8_t i=0;i<s.lastFrame.dlc;i++)tft.printf("%02X ",s.lastFrame.data[i]); }
         delay(80);
@@ -99,39 +138,47 @@ void capture(uint32_t bitrate) {
     if (!setupSdCard()) { displayError("Carte SD absente", true); return; }
     SD.mkdir("/Automotive"); SD.mkdir("/Automotive/captures"); String path=captureName(); File output=SD.open(path,FILE_WRITE);
     if (!output) { displayError("Creation ASC impossible",true); return; }
-    if (!beginCan(bitrate)) { output.close(); displayError(adapter().lastError(),true); return; }
+    if (!beginCan(bitrate)) { output.close(); displayError(transportStatus().lastError,true); return; }
+    armOperationStop();
     ascHeader(output,bitrate); activity().clear(); uint32_t origin=millis(),frames=0,drawAt=0,lastFlush=0; CanFrame frame,last; bool have=false;
-    while (!check(EscPress)) {
-        while(adapter().poll(frame)) { activity().update(frame); ascFrame(output,frame,origin); last=frame; have=true; frames++; }
+    while (!stopRequested()) {
+        for (uint8_t batch=0; batch<32 && transport().poll(frame); ++batch) {
+            activity().update(frame); ascFrame(output,frame,origin); last=frame; have=true; frames++;
+        }
         if(millis()-drawAt>250){drawAt=millis();drawLive(bitrate,frames,origin,have?&last:nullptr,path);}
         if (frames - lastFlush >= 64) { output.flush(); lastFlush = frames; }
         delay(1);
     }
-    output.println("End TriggerBlock"); output.close(); adapter().end();
+    output.println("End TriggerBlock"); output.close(); stopTransport();
 }
 
 void replay(uint32_t bitrate) {
     if (!setupSdCard()) { displayError("Carte SD absente",true); return; }
     String path=loopSD(SD,true,"ASC","/Automotive/captures"); if(!path.length())return; File input=SD.open(path,FILE_READ); if(!input){displayError("Fichier illisible",true);return;}
-    if(!beginCan(bitrate)){input.close();displayError(adapter().lastError(),true);return;}
+    if(!beginCan(bitrate)){input.close();displayError(transportStatus().lastError,true);return;}
+    if(!confirmTxUnlock()){input.close();stopTransport();displayError("Emission verrouillee",true);return;}
+    armOperationStop();
     float speed=1.0f; uint32_t sent=0,previousUs=0; // ASC parser accepts the format emitted above.
-    while(input.available()&&!check(EscPress)){
+    while(input.available() && !stopRequested()){
         String line=input.readStringUntil('\n'); line.trim(); if(!line.length()||!isdigit(line[0]))continue;
         double seconds=line.substring(0,line.indexOf(' ')).toDouble(); uint32_t currentUs=seconds*1000000.0;
         int p=line.indexOf(" 1  "); if(p<0)continue; String rest=line.substring(p+4); rest.trim();
         int space=rest.indexOf(' '); String idText=rest.substring(0,space); bool ext=idText.endsWith("x"); if(ext)idText.remove(idText.length()-1); CanFrame f; f.id=strtoul(idText.c_str(),nullptr,16); f.extended=ext;
         rest=rest.substring(space);rest.trim(); f.rtr=rest[0]=='r'; space=rest.indexOf(' ');rest=rest.substring(space);rest.trim(); space=rest.indexOf(' ');rest=rest.substring(space);rest.trim(); f.dlc=rest.substring(0,rest.indexOf(' ')).toInt();
         for(uint8_t i=0;i<f.dlc&&!f.rtr;i++){space=rest.indexOf(' ');if(space<0)break;rest=rest.substring(space);rest.trim();f.data[i]=strtoul(rest.substring(0,2).c_str(),nullptr,16);}
-        if (previousUs && currentUs > previousUs) delayMicroseconds((currentUs-previousUs)/speed);
+        if (previousUs && currentUs > previousUs &&
+            !waitInterruptible(static_cast<uint32_t>((currentUs-previousUs)/speed))) {
+            break;
+        }
         previousUs=currentUs;
-        if(adapter().send(f))sent++;
-        shell("CAN REPLAY",5,7,"STOP",true);tft.setCursor(8,33);tft.setTextSize(FM);tft.setTextColor(C_AMBER,C_BG);tft.printf("%.2fx  %lu trames",speed,(unsigned long)sent);
+        if(transport().send(f))sent++;
+        shell("CAN REPLAY",5,7,"2x HAUT: STOP",true);tft.setCursor(8,33);tft.setTextSize(FM);tft.setTextColor(C_AMBER,C_BG);tft.printf("%.2fx  %lu trames",speed,(unsigned long)sent);
     }
-    input.close();adapter().end();
+    input.close();stopTransport();
 }
 
 void wiringInfo() {
-    shell("CONFIGURATION",7,7,"RETOUR",false); tft.setTextSize(FP);tft.setTextColor(C_CYAN,C_BG);tft.setCursor(8,29);
+    shell("CONFIGURATION",7,7,"M5: RETOUR",false); tft.setTextSize(FP);tft.setTextColor(C_CYAN,C_BG);tft.setCursor(8,29);
     tft.println("G32 TX -> RX SLCAN");tft.println("G33 RX <- TX SLCAN");tft.println("GND commun / 3.3 V");tft.println("UART 115200, CAN classique");tft.println("Grove partage PM3/CAN");
     while(!check(EscPress)&&!check(SelPress))delay(20);
 }

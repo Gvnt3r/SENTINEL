@@ -3,13 +3,22 @@
 #include "core/sd_functions.h"
 #include <ArduinoJson.h>
 #include <SD.h>
+#include <Preferences.h>
+#include "core/grove_resource.h"
 #include <ctype.h>
+#include <driver/twai.h>
 
 namespace Automotive {
 namespace {
 HardwareSerial canUart(1);
 SlcanAdapter sharedAdapter(canUart);
+TwaiTransport sharedTwai;
 CanActivityTable sharedActivity;
+CanBackend selectedBackend = CanBackend::TWAI;
+bool txUnlocked = false;
+uint32_t activeBitrate = 0;
+int8_t activeRxPin = -1;
+int8_t activeTxPin = -1;
 
 int hexNibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -71,15 +80,20 @@ bool SlcanAdapter::transact(const String &cmd, uint32_t timeoutMs) {
 }
 
 bool SlcanAdapter::begin(uint32_t bitrate, int8_t rxPin, int8_t txPin) {
+    return begin(bitrate, rxPin, txPin, false);
+}
+
+bool SlcanAdapter::begin(uint32_t bitrate, int8_t rxPin, int8_t txPin, bool listenOnly) {
     char code = bitrateCode(bitrate);
     if (!code) { _lastError = "Debit non supporte"; return false; }
     _connected = false; _line = "";
     _serial.begin(SLCAN_BAUD, SERIAL_8N1, rxPin, txPin);
     _serial.setRxBufferSize(4096);
-    if (!transact("C") || !transact("S" + String(code)) || !transact("O")) {
+    if (!transact("C") || !transact("S" + String(code)) || !transact(listenOnly ? "L" : "O")) {
         _serial.end(); return false;
     }
-    _bitrate = bitrate; _connected = true; _lastError = ""; return true;
+    _bitrate = bitrate; _connected = true; _listenOnly = listenOnly; _lastError = "";
+    _rxFrames = 0; _txFrames = 0; return true;
 }
 
 void SlcanAdapter::end() {
@@ -135,7 +149,7 @@ bool SlcanAdapter::poll(CanFrame &frame) {
         if (c == '\r' || c == '\n') {
             if (!_line.length()) continue;
             String complete = _line; _line = "";
-            if (parseFrame(complete, frame)) { frame.tx = false; return true; }
+            if (parseFrame(complete, frame)) { frame.tx = false; _rxFrames++; return true; }
             _errors++; _lastError = "Ligne SLCAN invalide";
         } else if (isPrintable(c)) {
             if (_line.length() < 40) _line += c;
@@ -147,11 +161,101 @@ bool SlcanAdapter::poll(CanFrame &frame) {
 
 bool SlcanAdapter::send(const CanFrame &frame) {
     if (!_connected) { _lastError = "CAN ferme"; return false; }
+    if (_listenOnly) { _lastError = "Emission verrouillee"; return false; }
     String encoded = encodeFrame(frame);
     if (!encoded.length()) { _lastError = "Trame invalide"; return false; }
     bool ok = transact(encoded);
-    if (ok) { CanFrame sent = frame; sent.tx = true; sent.timestampMs = millis(); sharedActivity.update(sent); }
+    if (ok) { _txFrames++; CanFrame sent = frame; sent.tx = true; sent.timestampMs = millis(); sharedActivity.update(sent); }
     return ok;
+}
+
+CanTransportStatus SlcanAdapter::status() const {
+    CanTransportStatus s; s.connected = _connected; s.listenOnly = _listenOnly;
+    s.txUnlocked = _connected && !_listenOnly; s.bitrate = _bitrate; s.rxFrames = _rxFrames;
+    s.txFrames = _txFrames; s.errors = _errors; s.lastError = _lastError;
+    s.busState = !_connected ? CanBusState::STOPPED : (_listenOnly ? CanBusState::PASSIVE : CanBusState::ACTIVE);
+    return s;
+}
+
+namespace {
+bool twaiTiming(uint32_t bitrate, twai_timing_config_t &out) {
+    switch (bitrate) {
+        // ESP32 rev. 2+ accepts this timing, although ESP-IDF hides the convenience
+        // macro when the minimum silicon revision is not fixed at compile time.
+        case 10000: out = {TWAI_CLK_SRC_DEFAULT, 200000, 0, 0, 15, 4, 3, 0, false}; break;
+        case 20000: out = TWAI_TIMING_CONFIG_20KBITS(); break;
+        case 50000: out = TWAI_TIMING_CONFIG_50KBITS(); break;
+        case 100000: out = TWAI_TIMING_CONFIG_100KBITS(); break;
+        case 125000: out = TWAI_TIMING_CONFIG_125KBITS(); break;
+        case 250000: out = TWAI_TIMING_CONFIG_250KBITS(); break;
+        case 500000: out = TWAI_TIMING_CONFIG_500KBITS(); break;
+        case 800000: out = TWAI_TIMING_CONFIG_800KBITS(); break;
+        case 1000000: out = TWAI_TIMING_CONFIG_1MBITS(); break;
+        default: return false;
+    }
+    return true;
+}
+}
+
+bool TwaiTransport::begin(uint32_t bitrate, int8_t rxPin, int8_t txPin, bool listenOnly) {
+    end(); _status = {}; _status.listenOnly = listenOnly; _status.bitrate = bitrate;
+    twai_timing_config_t timing{};
+    if (!twaiTiming(bitrate, timing)) { _status.lastError = "Debit TWAI non supporte"; return false; }
+    twai_general_config_t general = TWAI_GENERAL_CONFIG_DEFAULT(
+        static_cast<gpio_num_t>(txPin), static_cast<gpio_num_t>(rxPin),
+        listenOnly ? TWAI_MODE_LISTEN_ONLY : TWAI_MODE_NORMAL
+    );
+    general.rx_queue_len = 128; general.tx_queue_len = listenOnly ? 0 : 32;
+    general.alerts_enabled = TWAI_ALERT_BUS_OFF | TWAI_ALERT_BUS_RECOVERED | TWAI_ALERT_ERR_PASS |
+                             TWAI_ALERT_ABOVE_ERR_WARN | TWAI_ALERT_RX_QUEUE_FULL;
+    twai_filter_config_t filter = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    esp_err_t result = twai_driver_install(&general, &timing, &filter);
+    if (result != ESP_OK) { _status.lastError = "Installation TWAI: " + String(esp_err_to_name(result)); return false; }
+    _installed = true;
+    result = twai_start();
+    if (result != ESP_OK) { _status.lastError = "Demarrage TWAI: " + String(esp_err_to_name(result)); end(); return false; }
+    _status.connected = true; _status.txUnlocked = !listenOnly;
+    _status.busState = listenOnly ? CanBusState::PASSIVE : CanBusState::ACTIVE;
+    return true;
+}
+
+void TwaiTransport::end() {
+    if (_installed) { twai_stop(); twai_driver_uninstall(); }
+    _installed = false; _status.connected = false; _status.txUnlocked = false;
+    _status.busState = CanBusState::STOPPED;
+}
+
+bool TwaiTransport::poll(CanFrame &frame) {
+    if (!_installed) return false;
+    uint32_t alerts = 0;
+    if (twai_read_alerts(&alerts, 0) == ESP_OK && alerts) {
+        if (alerts & TWAI_ALERT_BUS_OFF) { _status.busState = CanBusState::BUS_OFF; _status.errors++; _status.lastError = "CAN bus-off"; }
+        if (alerts & TWAI_ALERT_BUS_RECOVERED) _status.busState = _status.listenOnly ? CanBusState::PASSIVE : CanBusState::ACTIVE;
+        if (alerts & (TWAI_ALERT_ERR_PASS | TWAI_ALERT_ABOVE_ERR_WARN)) { _status.busState = CanBusState::WARNING; _status.errors++; }
+        if (alerts & TWAI_ALERT_RX_QUEUE_FULL) _status.rxMissed++;
+    }
+    twai_message_t message{};
+    if (twai_receive(&message, 0) != ESP_OK) return false;
+    frame = {}; frame.id = message.identifier; frame.extended = message.extd;
+    frame.rtr = message.rtr; frame.dlc = min<uint8_t>(message.data_length_code, 8);
+    for (uint8_t i=0; !frame.rtr && i<frame.dlc; ++i) frame.data[i] = message.data[i];
+    frame.timestampMs = millis(); _status.rxFrames++; return true;
+}
+
+bool TwaiTransport::send(const CanFrame &frame) {
+    if (!_installed || _status.listenOnly || !_status.txUnlocked) { _status.lastError = "Emission verrouillee"; return false; }
+    String error; if (!validateFrame(frame, &error)) { _status.lastError = error; return false; }
+    twai_message_t message{}; message.identifier = frame.id; message.extd = frame.extended;
+    message.rtr = frame.rtr; message.data_length_code = frame.dlc;
+    for (uint8_t i=0; !frame.rtr && i<frame.dlc; ++i) message.data[i] = frame.data[i];
+    if (twai_transmit(&message, pdMS_TO_TICKS(50)) != ESP_OK) { _status.errors++; _status.lastError = "File TX pleine"; return false; }
+    _status.txFrames++; CanFrame sent=frame; sent.tx=true; sent.timestampMs=millis(); sharedActivity.update(sent); return true;
+}
+
+CanTransportStatus TwaiTransport::status() const {
+    CanTransportStatus result = _status;
+    if (_installed) { twai_status_info_t info{}; if (twai_get_status_info(&info)==ESP_OK) { result.errors += info.tx_error_counter + info.rx_error_counter; result.rxMissed += info.rx_missed_count + info.rx_overrun_count; } }
+    return result;
 }
 
 bool validateFrame(const CanFrame &frame, String *error) {
@@ -162,16 +266,28 @@ bool validateFrame(const CanFrame &frame, String *error) {
     return true;
 }
 
-void CanActivityTable::clear() { _items.clear(); }
+CanActivityTable::CanActivityTable() : _mutex(xSemaphoreCreateMutex()) {}
+void CanActivityTable::clear() {
+    if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+    _items.clear();
+    if (_mutex) xSemaphoreGive(_mutex);
+}
+std::vector<CanIdStats> CanActivityTable::snapshot() const {
+    if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+    std::vector<CanIdStats> copy = _items;
+    if (_mutex) xSemaphoreGive(_mutex);
+    return copy;
+}
 const CanIdStats *CanActivityTable::find(uint32_t id, bool ext) const {
     for (const auto &item : _items) if (item.id == id && item.extended == ext) return &item;
     return nullptr;
 }
 void CanActivityTable::update(const CanFrame &frame) {
+    if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
     CanIdStats *item = nullptr;
     for (auto &candidate : _items) if (candidate.id == frame.id && candidate.extended == frame.extended) { item = &candidate; break; }
     if (!item) {
-        if (_items.size() >= MAX_ACTIVE_IDS) return;
+        if (_items.size() >= MAX_ACTIVE_IDS) { if (_mutex) xSemaphoreGive(_mutex); return; }
         _items.push_back({}); item = &_items.back(); item->id = frame.id; item->extended = frame.extended;
         item->firstSeenMs = frame.timestampMs;
     } else {
@@ -182,6 +298,7 @@ void CanActivityTable::update(const CanFrame &frame) {
     item->count++; item->lastSeenMs = frame.timestampMs; item->lastFrame = frame;
     uint32_t span = item->lastSeenMs - item->firstSeenMs;
     item->frequencyHz = span ? (item->count - 1) * 1000.0f / span : 0;
+    if (_mutex) xSemaphoreGive(_mutex);
 }
 
 bool parseBitrate(const String &value, uint32_t &bitrate) {
@@ -195,8 +312,9 @@ bool filterAccepts(const CanFrame &frame, const std::vector<CanFilter> &inc, con
 
 bool loadFilters(FS &fs, std::vector<CanFilter> &inc, std::vector<CanFilter> &exc) {
     inc.clear(); exc.clear(); File file = fs.open("/Automotive/filters.json", FILE_READ); if (!file) return false;
+    if (file.size() > 16384) { file.close(); return false; }
     JsonDocument doc; if (deserializeJson(doc, file)) { file.close(); return false; } file.close();
-    auto read = [](JsonArrayConst array, std::vector<CanFilter> &out) { for (JsonObjectConst o : array) { CanFilter f{o["id"] | 0U, o["extended"] | false}; if ((f.extended && f.id <= 0x1FFFFFFF) || (!f.extended && f.id <= 0x7FF)) out.push_back(f); } };
+    auto read = [](JsonArrayConst array, std::vector<CanFilter> &out) { for (JsonObjectConst o : array) { if (out.size() >= MAX_ACTIVE_IDS) break; CanFilter f{o["id"] | 0U, o["extended"] | false}; if ((f.extended && f.id <= 0x1FFFFFFF) || (!f.extended && f.id <= 0x7FF)) out.push_back(f); } };
     read(doc["include"].as<JsonArrayConst>(), inc); read(doc["exclude"].as<JsonArrayConst>(), exc); return true;
 }
 
@@ -212,6 +330,7 @@ String scenarioPath(const String &name) { return safeName(name) ? "/Automotive/s
 
 bool loadScenario(FS &fs, const String &path, CanScenario &scenario, String *error) {
     File file = fs.open(path, FILE_READ); if (!file) { setError(error, "scenario introuvable"); return false; }
+    if (file.size() > 49152) { file.close(); setError(error, "scenario trop volumineux"); return false; }
     JsonDocument doc; DeserializationError de = deserializeJson(doc, file); file.close(); if (de) { setError(error, de.c_str()); return false; }
     scenario = {}; scenario.name = doc["name"] | ""; scenario.bitrate = doc["bitrate"] | 0U;
     if (!safeName(scenario.name) || !SlcanAdapter::bitrateCode(scenario.bitrate)) { setError(error, "nom/debit invalide"); return false; }
@@ -231,7 +350,18 @@ bool saveScenarioAtomic(FS &fs, const CanScenario &scenario, String *error) {
         if (s.delayMs > 3600000 || s.repetitions < 1 || s.repetitions > 10000 || !validateFrame(s.frame, error)) return false;
         JsonObject o = steps.add<JsonObject>(); o["delayMs"] = s.delayMs; o["repetitions"] = s.repetitions; JsonObject f = o["frame"].to<JsonObject>(); f["id"] = s.frame.id; f["extended"] = s.frame.extended; f["rtr"] = s.frame.rtr; f["dlc"] = s.frame.dlc; JsonArray d = f["data"].to<JsonArray>(); if (!s.frame.rtr) for (uint8_t i=0;i<s.frame.dlc;i++) d.add(s.frame.data[i]);
     }
-    String tmp = path + ".tmp"; File file = fs.open(tmp, FILE_WRITE); if (!file) { setError(error, "ecriture impossible"); return false; } bool ok = serializeJson(doc, file) > 0; file.flush(); file.close(); if (!ok) return false; fs.remove(path); if (!fs.rename(tmp, path)) { setError(error, "renommage impossible"); return false; } return true;
+    String tmp = path + ".tmp", backup = path + ".bak";
+    fs.remove(tmp); fs.remove(backup);
+    File file = fs.open(tmp, FILE_WRITE); if (!file) { setError(error, "ecriture impossible"); return false; }
+    bool ok = serializeJson(doc, file) > 0; file.flush(); file.close();
+    if (!ok) { fs.remove(tmp); setError(error, "serialization impossible"); return false; }
+    bool hadOriginal = fs.exists(path);
+    if (hadOriginal && !fs.rename(path, backup)) { fs.remove(tmp); setError(error, "sauvegarde impossible"); return false; }
+    if (!fs.rename(tmp, path)) {
+        if (hadOriginal) fs.rename(backup, path);
+        setError(error, "renommage impossible"); return false;
+    }
+    fs.remove(backup); return true;
 }
 
 bool deleteScenario(FS &fs, const String &name) { String p = scenarioPath(name); return p.length() && fs.exists(p) && fs.remove(p); }
@@ -241,5 +371,44 @@ String frameToJson(const CanFrame &f) {
 }
 
 SlcanAdapter &adapter() { return sharedAdapter; }
+TwaiTransport &twaiAdapter() { return sharedTwai; }
+
+const char *backendName(CanBackend value) { return value == CanBackend::TWAI ? "TWAI" : "SLCAN"; }
+CanBackend backend() { return selectedBackend; }
+
+bool setBackend(CanBackend value) {
+    stopTransport(); selectedBackend = value;
+    Preferences prefs; if (!prefs.begin("sentinel-can", false)) return false;
+    prefs.putUChar("backend", static_cast<uint8_t>(value)); prefs.end(); return true;
+}
+
+CanTransport &transport() { return selectedBackend == CanBackend::TWAI ? static_cast<CanTransport &>(sharedTwai) : static_cast<CanTransport &>(sharedAdapter); }
+CanTransportStatus transportStatus() { CanTransportStatus s=transport().status(); s.txUnlocked=txUnlocked && s.connected && !s.listenOnly; return s; }
+
+bool startTransport(uint32_t bitrate, int8_t rxPin, int8_t txPin) {
+    static bool loaded = false;
+    if (!loaded) { Preferences prefs; if (prefs.begin("sentinel-can", true)) { selectedBackend = static_cast<CanBackend>(min<uint8_t>(prefs.getUChar("backend", 0), 1)); prefs.end(); } loaded=true; }
+    stopTransport();
+    if (!acquireGrove(GroveOwner::CAN)) return false;
+    activeBitrate=bitrate; activeRxPin=rxPin; activeTxPin=txPin; txUnlocked=false;
+    if (transport().begin(bitrate, rxPin, txPin, true)) return true;
+    releaseGrove(GroveOwner::CAN); return false;
+}
+
+void stopTransport() { sharedTwai.end(); sharedAdapter.end(); txUnlocked=false; releaseGrove(GroveOwner::CAN); }
+
+bool unlockTransmission() {
+    if (!activeBitrate || activeRxPin < 0 || activeTxPin < 0) return false;
+    transport().end();
+    if (!transport().begin(activeBitrate, activeRxPin, activeTxPin, false)) { txUnlocked=false; return false; }
+    txUnlocked=true; return true;
+}
+
+void lockTransmission() {
+    if (!activeBitrate) { txUnlocked=false; return; }
+    transport().end(); transport().begin(activeBitrate, activeRxPin, activeTxPin, true); txUnlocked=false;
+}
+
+bool transmissionUnlocked() { return txUnlocked; }
 CanActivityTable &activity() { return sharedActivity; }
 } // namespace Automotive

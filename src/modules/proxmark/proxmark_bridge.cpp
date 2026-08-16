@@ -1,6 +1,8 @@
 #include "proxmark_bridge.h"
 
 #include "core/display.h"
+#include "core/grove_resource.h"
+#include "core/operation_control.h"
 #include "core/sd_functions.h"
 #include <SD.h>
 #include <globals.h>
@@ -19,7 +21,7 @@ void drawBridgeScreen(uint32_t baud, bool logging, uint32_t hostToPm3, uint32_t 
     tft.printf("PC -> PM3: %lu B\n", static_cast<unsigned long>(hostToPm3));
     tft.printf("PM3 -> PC: %lu B\n", static_cast<unsigned long>(pm3ToHost));
     tft.printf("SD log: %s\n", logging ? "ON" : "OFF");
-    tft.println("M5+Power: quitter");
+    tft.println("2x bouton haut: stop");
 }
 } // namespace
 
@@ -41,6 +43,7 @@ void wiringInfo() {
 }
 
 void run(uint32_t baud, bool logToSd) {
+    if (!acquireGrove(GroveOwner::PROXMARK)) { displayError(String("Grove utilise par ") + groveOwnerName()); return; }
     File log;
     bool logging = false;
     if (logToSd && setupSdCard()) {
@@ -57,15 +60,16 @@ void run(uint32_t baud, bool logToSd) {
     uint32_t pm3ToHost = 0;
     uint32_t lastDraw = 0;
     drawBridgeScreen(baud, logging, hostToPm3, pm3ToHost);
+    armOperationExit();
 
-    while (!check(EscPress)) {
-        while (Serial.available()) {
+    while (!operationExitRequested()) {
+        for (uint8_t batch = 0; batch < 64 && Serial.available(); ++batch) {
             uint8_t value = static_cast<uint8_t>(Serial.read());
             proxmarkSerial.write(value);
             hostToPm3++;
             if (logging) log.write(value);
         }
-        while (proxmarkSerial.available()) {
+        for (uint8_t batch = 0; batch < 64 && proxmarkSerial.available(); ++batch) {
             uint8_t value = static_cast<uint8_t>(proxmarkSerial.read());
             Serial.write(value);
             pm3ToHost++;
@@ -81,6 +85,7 @@ void run(uint32_t baud, bool logToSd) {
 
     if (logging) log.close();
     proxmarkSerial.end();
+    releaseGrove(GroveOwner::PROXMARK);
 }
 
 } // namespace ProxmarkBridge

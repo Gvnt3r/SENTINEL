@@ -5,6 +5,8 @@
 #include <HardwareSerial.h>
 #include <array>
 #include <vector>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace Automotive {
 
@@ -49,13 +51,43 @@ struct CanFilter {
     bool extended = false;
 };
 
-class SlcanAdapter {
+enum class CanBackend : uint8_t { TWAI, SLCAN };
+enum class CanBusState : uint8_t { STOPPED, ACTIVE, PASSIVE, WARNING, BUS_OFF };
+
+struct CanTransportStatus {
+    bool connected = false;
+    bool listenOnly = true;
+    bool txUnlocked = false;
+    uint32_t bitrate = 0;
+    uint32_t rxFrames = 0;
+    uint32_t txFrames = 0;
+    uint32_t errors = 0;
+    uint32_t rxMissed = 0;
+    CanBusState busState = CanBusState::STOPPED;
+    String lastError;
+};
+
+class CanTransport {
+public:
+    virtual ~CanTransport() = default;
+    virtual bool begin(uint32_t bitrate, int8_t rxPin, int8_t txPin, bool listenOnly) = 0;
+    virtual void end() = 0;
+    virtual bool poll(CanFrame &frame) = 0;
+    virtual bool send(const CanFrame &frame) = 0;
+    virtual const char *name() const = 0;
+    virtual CanTransportStatus status() const = 0;
+};
+
+class SlcanAdapter : public CanTransport {
 public:
     explicit SlcanAdapter(HardwareSerial &serial);
     bool begin(uint32_t bitrate, int8_t rxPin, int8_t txPin);
-    void end();
-    bool poll(CanFrame &frame);
-    bool send(const CanFrame &frame);
+    bool begin(uint32_t bitrate, int8_t rxPin, int8_t txPin, bool listenOnly) override;
+    void end() override;
+    bool poll(CanFrame &frame) override;
+    bool send(const CanFrame &frame) override;
+    const char *name() const override { return "SLCAN"; }
+    CanTransportStatus status() const override;
     bool connected() const { return _connected; }
     uint32_t bitrate() const { return _bitrate; }
     uint32_t errors() const { return _errors; }
@@ -73,16 +105,35 @@ private:
     uint32_t _bitrate = 0;
     uint32_t _errors = 0;
     String _lastError;
+    bool _listenOnly = true;
+    uint32_t _rxFrames = 0;
+    uint32_t _txFrames = 0;
+};
+
+class TwaiTransport : public CanTransport {
+public:
+    bool begin(uint32_t bitrate, int8_t rxPin, int8_t txPin, bool listenOnly) override;
+    void end() override;
+    bool poll(CanFrame &frame) override;
+    bool send(const CanFrame &frame) override;
+    const char *name() const override { return "TWAI"; }
+    CanTransportStatus status() const override;
+private:
+    bool _installed = false;
+    CanTransportStatus _status;
 };
 
 class CanActivityTable {
 public:
+    CanActivityTable();
     void clear();
     void update(const CanFrame &frame);
     const std::vector<CanIdStats> &items() const { return _items; }
+    std::vector<CanIdStats> snapshot() const;
     const CanIdStats *find(uint32_t id, bool extended) const;
 private:
     std::vector<CanIdStats> _items;
+    mutable SemaphoreHandle_t _mutex = nullptr;
 };
 
 bool validateFrame(const CanFrame &frame, String *error = nullptr);
@@ -98,6 +149,17 @@ String scenarioPath(const String &name);
 String frameToJson(const CanFrame &frame);
 
 SlcanAdapter &adapter();
+TwaiTransport &twaiAdapter();
+CanTransport &transport();
+CanTransportStatus transportStatus();
+CanBackend backend();
+bool setBackend(CanBackend value);
+const char *backendName(CanBackend value);
+bool startTransport(uint32_t bitrate, int8_t rxPin, int8_t txPin);
+void stopTransport();
+bool unlockTransmission();
+void lockTransmission();
+bool transmissionUnlocked();
 CanActivityTable &activity();
 
 } // namespace Automotive

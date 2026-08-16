@@ -16,6 +16,8 @@
 #include <esp32-hal-psram.h>
 #include <esp_heap_caps.h>
 #include <globals.h>
+#include <esp_system.h>
+#include <errno.h>
 
 File uploadFile;
 FS _webFS = LittleFS;
@@ -32,10 +34,22 @@ static bool mdnsRunning = false;
 
 // Generate random token
 String generateToken(int length = 24) {
-    String token = "";
+    String token;
     const char charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for (int i = 0; i < length; i++) { token += charset[random(0, sizeof(charset) - 1)]; }
+    token.reserve(length);
+    for (int i = 0; i < length; i++) {
+        uint32_t randomValue = esp_random();
+        token += charset[randomValue % (sizeof(charset) - 1)];
+    }
     return token;
+}
+
+bool parseUnsignedArg(const String &input, uint32_t maximum, uint32_t &value) {
+    if (!input.length() || input[0] == '-') return false;
+    errno = 0; char *end = nullptr;
+    unsigned long parsed = strtoul(input.c_str(), &end, 0);
+    if (errno == ERANGE || !end || *end != '\0' || parsed > maximum) return false;
+    value = static_cast<uint32_t>(parsed); return true;
 }
 
 /**********************************************************************
@@ -173,9 +187,9 @@ bool checkUserWebAuth(AsyncWebServerRequest *request, bool onFailureReturnLoginP
     if (request->hasHeader("Cookie")) {
         const AsyncWebHeader *cookie = request->getHeader("Cookie");
         String c = cookie->value();
-        int idx = c.indexOf("BRUCESESSION=");
+        int idx = c.indexOf("SENTINELSESSION=");
         if (idx != -1) {
-            int start = idx + 13;
+            int start = idx + 16;
             int end = c.indexOf(';', start);
             if (end == -1) end = c.length();
             String token = c.substring(start, end);
@@ -416,7 +430,7 @@ void configureWebServer() {
                 String token = generateToken();
                 AsyncWebServerResponse *response = request->beginResponse(302);
                 response->addHeader("Location", "/");
-                response->addHeader("Set-Cookie", "BRUCESESSION=" + token + "; Path=/; HttpOnly");
+                response->addHeader("Set-Cookie", "SENTINELSESSION=" + token + "; Path=/; HttpOnly; SameSite=Strict");
                 request->send(response);
                 bruceConfig.addWebUISession(token);
                 return;
@@ -432,9 +446,9 @@ void configureWebServer() {
         if (request->hasHeader("Cookie")) {
             const AsyncWebHeader *cookie = request->getHeader("Cookie");
             String c = cookie->value();
-            int idx = c.indexOf("BRUCESESSION=");
+            int idx = c.indexOf("SENTINELSESSION=");
             if (idx != -1) {
-                int start = idx + 13;
+                int start = idx + 16;
                 int end = c.indexOf(';', start);
                 if (end == -1) end = c.length();
                 String token = c.substring(start, end);
@@ -443,7 +457,7 @@ void configureWebServer() {
         }
         AsyncWebServerResponse *response = request->beginResponse(302);
         response->addHeader("Location", "/?loggedout");
-        response->addHeader("Set-Cookie", "BRUCESESSION=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+        response->addHeader("Set-Cookie", "SENTINELSESSION=0; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
         request->send(response);
     });
 
@@ -461,19 +475,49 @@ void configureWebServer() {
     // Automotive API. All endpoints use the same session authentication as the WebUI.
     server->on("/api/can/status", HTTP_GET, [](AsyncWebServerRequest *request) {
         if (!checkUserWebAuth(request)) return;
-        auto &can = Automotive::adapter();
-        String body = "{\"connected\":" + String(can.connected() ? "true" : "false") +
-                      ",\"bitrate\":" + String(can.bitrate()) + ",\"errors\":" +
-                      String(can.errors()) + ",\"activeIds\":" +
-                      String(Automotive::activity().items().size()) + ",\"lastError\":\"";
-        String error = can.lastError(); error.replace("\\", "\\\\"); error.replace("\"", "\\\"");
+        const auto state = Automotive::transportStatus();
+        String error = state.lastError; error.replace("\\", "\\\\"); error.replace("\"", "\\\"");
+        String body = "{\"connected\":" + String(state.connected ? "true" : "false") +
+                      ",\"backend\":\"" + Automotive::backendName(Automotive::backend()) + "\",\"listenOnly\":" +
+                      String(state.listenOnly ? "true" : "false") + ",\"txUnlocked\":" +
+                      String(state.txUnlocked ? "true" : "false") + ",\"bitrate\":" +
+                      String(state.bitrate) + ",\"errors\":" + String(state.errors) +
+                      ",\"rxFrames\":" + String(state.rxFrames) + ",\"txFrames\":" +
+                      String(state.txFrames) + ",\"rxMissed\":" + String(state.rxMissed) +
+                      ",\"activeIds\":" +
+                      String(Automotive::activity().snapshot().size()) + ",\"lastError\":\"";
         request->send(200, "application/json", body + error + "\"}");
+    });
+
+    server->on("/api/can/config", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (!checkUserWebAuth(request)) return;
+        request->send(200, "application/json", String("{\"backend\":\"") + Automotive::backendName(Automotive::backend()) +
+            "\",\"txUnlock\":\"physical-session-only\"}");
+    });
+
+    server->on("/api/can/config", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (!checkUserWebAuth(request)) return;
+        if (!request->hasArg("backend")) { request->send(400, "application/json", "{\"error\":\"backend requis\"}"); return; }
+        String value = request->arg("backend"); value.toLowerCase();
+        Automotive::CanBackend selected;
+        if (value == "twai") selected = Automotive::CanBackend::TWAI;
+        else if (value == "slcan") selected = Automotive::CanBackend::SLCAN;
+        else { request->send(400, "application/json", "{\"error\":\"backend doit etre twai ou slcan\"}"); return; }
+        Automotive::stopTransport();
+        Automotive::setBackend(selected);
+        request->send(200, "application/json", String("{\"backend\":\"") + Automotive::backendName(Automotive::backend()) + "\"}");
+    });
+
+    server->on("/api/can/lock", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (!checkUserWebAuth(request)) return;
+        Automotive::lockTransmission();
+        request->send(200, "application/json", "{\"txUnlocked\":false}");
     });
 
     server->on("/api/can/ids", HTTP_GET, [](AsyncWebServerRequest *request) {
         if (!checkUserWebAuth(request)) return;
         String body = "["; bool first = true;
-        for (const auto &item : Automotive::activity().items()) {
+        for (const auto &item : Automotive::activity().snapshot()) {
             if (!first) body += ',';
             first = false;
             body += "{\"id\":" + String(item.id) + ",\"extended\":" +
@@ -487,14 +531,20 @@ void configureWebServer() {
     server->on("/api/can/send", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (!checkUserWebAuth(request)) return;
         if (!request->hasArg("id") || !request->hasArg("dlc")) { request->send(400,"application/json","{\"error\":\"id et dlc requis\"}"); return; }
-        Automotive::CanFrame frame; frame.id = strtoul(request->arg("id").c_str(), nullptr, 0);
+        Automotive::CanFrame frame; uint32_t parsedId = 0, parsedDlc = 0;
+        if (!parseUnsignedArg(request->arg("id"), 0x1FFFFFFF, parsedId) ||
+            !parseUnsignedArg(request->arg("dlc"), 8, parsedDlc)) {
+            request->send(400,"application/json","{\"error\":\"id ou dlc invalide\"}"); return;
+        }
+        frame.id = parsedId;
         frame.extended = request->arg("extended") == "true" || request->arg("extended") == "1";
         frame.rtr = request->arg("rtr") == "true" || request->arg("rtr") == "1";
-        frame.dlc = request->arg("dlc").toInt(); String data = request->arg("data"); data.replace(" ", ""); data.replace(":", "");
+        frame.dlc = static_cast<uint8_t>(parsedDlc); String data = request->arg("data"); data.replace(" ", ""); data.replace(":", "");
         if (!frame.rtr && data.length() != frame.dlc * 2) { request->send(400,"application/json","{\"error\":\"data doit contenir exactement DLC octets hex\"}"); return; }
         for (uint8_t i=0; i<frame.dlc && i<8; ++i) { char pair[3]={data[i*2],data[i*2+1],0}; char *end=nullptr; long value=strtol(pair,&end,16); if (!end || *end) { request->send(400,"application/json","{\"error\":\"data hex invalide\"}"); return; } frame.data[i]=value; }
         String error; if (!Automotive::validateFrame(frame,&error)) { request->send(400,"application/json","{\"error\":\""+error+"\"}"); return; }
-        if (!Automotive::adapter().send(frame)) { request->send(409,"application/json","{\"error\":\""+Automotive::adapter().lastError()+"\"}"); return; }
+        if (!Automotive::transmissionUnlocked()) { request->send(423,"application/json","{\"error\":\"TX verrouille: deverrouillage physique requis sur le Stick\"}"); return; }
+        if (!Automotive::transport().send(frame)) { request->send(409,"application/json","{\"error\":\""+Automotive::transportStatus().lastError+"\"}"); return; }
         request->send(200,"application/json",Automotive::frameToJson(frame));
     });
 
@@ -510,6 +560,7 @@ void configureWebServer() {
     server->on("/api/can/scenario", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (!checkUserWebAuth(request)) return;
         if (!request->hasArg("name") || !request->hasArg("content") || !setupSdCard()) { request->send(400,"application/json","{\"error\":\"name/content/SD requis\"}"); return; }
+        if (request->arg("content").length() > 49152) { request->send(413,"application/json","{\"error\":\"scenario trop volumineux\"}"); return; }
         String finalPath=Automotive::scenarioPath(request->arg("name")); if(!finalPath.length()){request->send(400,"application/json","{\"error\":\"nom invalide\"}");return;}
         SD.mkdir("/Automotive");SD.mkdir("/Automotive/scenarios");String incoming=finalPath+".incoming";File file=SD.open(incoming,FILE_WRITE);if(!file){request->send(500,"application/json","{\"error\":\"ecriture impossible\"}");return;}file.print(request->arg("content"));file.close();
         Automotive::CanScenario scenario;String error;if(!Automotive::loadScenario(SD,incoming,scenario,&error)||scenario.name!=request->arg("name")){SD.remove(incoming);request->send(400,"application/json","{\"error\":\"scenario invalide: "+error+"\"}");return;}SD.remove(incoming);
@@ -535,7 +586,7 @@ void configureWebServer() {
                 sizeof(response_body),
                 "{\"%s\":\"%s\",\"SD\":{\"%s\":\"%s\",\"%s\":\"%s\",\"%s\":\"%s\"},"
                 "\"LittleFS\":{\"%s\":\"%s\",\"%s\":\"%s\",\"%s\":\"%s\"}}",
-                "BRUCE_VERSION",
+                "FIRMWARE_VERSION",
                 BRUCE_VERSION,
                 "free",
                 humanReadableSize(SDTotalBytes - SDUsedBytes).c_str(),
@@ -642,7 +693,7 @@ void configureWebServer() {
     });
 
     // Reboot device
-    server->on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request) {
+    server->on("/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (checkUserWebAuth(request)) { ESP.restart(); }
     });
 
@@ -790,15 +841,13 @@ void configureWebServer() {
     );
 
     // Wi-Fi configuration
-    server->on("/wifi", HTTP_GET, [](AsyncWebServerRequest *request) {
+    server->on("/wifi", HTTP_POST, [](AsyncWebServerRequest *request) {
         if (checkUserWebAuth(request)) {
             if (request->hasArg("usr") && request->hasArg("pwd")) {
                 const char *usr = request->arg("usr").c_str();
                 const char *pwd = request->arg("pwd").c_str();
                 bruceConfig.setWebUICreds(usr, pwd);
-                request->send(
-                    200, "text/plain", "User: " + String(usr) + " configured with password: " + String(pwd)
-                );
+                request->send(200, "text/plain", "WebUI credentials updated");
             }
         }
     });

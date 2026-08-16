@@ -27,8 +27,6 @@ void parse_config_file(File configFile) {
 
     while (configFile.available()) {
         line = configFile.readStringUntil('\n');
-        Serial.println("==========PRINTING LINE");
-        Serial.println(line);
         line.trim();
 
         if (line.startsWith("[Interface]") || line.isEmpty()) {
@@ -37,7 +35,6 @@ void parse_config_file(File configFile) {
         } else if (line.startsWith("PrivateKey")) {
             line.remove(0, line.indexOf('=') + 1);
             line.trim();
-            Serial.println("Private Key: " + line);
             strncpy(private_key, line.c_str(), sizeof(private_key) - 1);
             private_key[sizeof(private_key) - 1] = '\0'; // Ensure null-terminated
         } else if (line.startsWith("Address")) {

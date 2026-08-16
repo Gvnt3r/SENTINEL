@@ -569,9 +569,28 @@ String generalKeyboard(
     uint8_t longNextPress = 0;
     uint8_t longPrevPress = 0;
     unsigned long LongPressTmp = millis();
+#if defined(ARDUINO_M5STICK_C_PLUS2)
+    uint32_t keyboardBackHeldAt = 0;
+#endif
 
     // main loop
     while (1) {
+#if defined(ARDUINO_M5STICK_C_PLUS2)
+        // In text entry, holding the top button is an explicit cancel gesture.
+        // Delay normal navigation until release so the hold cannot move the cursor first.
+        if (digitalRead(UP_BTN) == LOW) {
+            if (!keyboardBackHeldAt) keyboardBackHeldAt = millis();
+            if (millis() - keyboardBackHeldAt >= 700) {
+                PrevPress = false;
+                LongPress = false;
+                current_text = "\x1B";
+                break;
+            }
+            delay(1);
+            continue;
+        }
+        keyboardBackHeldAt = 0;
+#endif
         if (redraw) {
             // setup
             tft.setCursor(0, 0);
