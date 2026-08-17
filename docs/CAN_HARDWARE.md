@@ -17,7 +17,19 @@ Pour le banc de validation v0.1-beta, le composant retenu est un **TI VP230 / SN
 
 Relier ensuite `CANH` et `CANL` au réseau. Ne pas ajouter de résistance de terminaison sur une prise OBD-II d’un véhicule normalement terminé. Sur un banc isolé, placer 120 Ω à chaque extrémité du bus.
 
-> Le **M5Stack Unit CAN** classique contient son propre microcontrôleur et dialogue en UART avec un protocole propriétaire : ce n’est pas un simple transceiver TWAI. Il pourra devenir un backend distinct, mais ne doit pas être câblé comme le tableau ci-dessus. Utiliser pour TWAI un module transceiver explicitement prévu pour une entrée TXD/RXD 3,3 V.
+### Modules CAN M5Stack officiels
+
+Le **Unit CAN** M5Stack actuel (chip `CA-IS3050G`) n’est pas un module UART à protocole propriétaire contrairement à une note précédente de ce document : c’est un transceiver CAN isolé galvaniquement, à sortie TXD/RXD brute, du même principe que le VP230 ci-dessus. Sa tension logique côté TXD/RXD n’est en revanche pas documentée par M5Stack sur ce connecteur JST à rail unique 5 V : le `CA-IS3050G` accepte 2,5–5 V côté logique selon son alimentation VIO, mais rien ne confirme que ce breakout régule ce rail à 3,3 V. Ne pas le relier à GPIO32/33 sans avoir vérifié la tension réelle en sortie (multimètre, hors bus) ou sans level shifter par précaution.
+
+D’autres modules CAN existent dans la gamme M5Stack, avec des interfaces différentes du backend TWAI actuel :
+
+| Module M5Stack | Chip | Interface | Compatibilité avec SENTINEL v0.1-beta |
+|---|---|---|---|
+| Unit CAN | `CA-IS3050G` | TXD/RXD brut, isolé, alim. 5 V | proche TWAI, tension logique TXD/RXD à vérifier avant câblage |
+| Unit Mini CAN | `TJA1051T` | TXD/RXD brut (à confirmer) | non testé ; TJA = composants historiquement 5 V, prudence identique au TJA1050 |
+| Module COMMU | `MCP2515` (SPI) + `SP3485EN` | SPI vers l’hôte (CS/INT/SCK/SI/SO sur GPIO12/15/18/19/23) | non compatible : ni le backend TWAI ni SLCAN ne pilotent de contrôleur SPI |
+
+Ces trois modules sont des candidats de backends distincts, pas des équivalents du VP230 câblé directement. Aucun n’est implémenté ni validé électriquement dans ce fork à ce stade ; ce tableau documente la compatibilité connue pour éviter un mauvais câblage, pas une prise en charge logicielle.
 
 ## 2. Adaptateur Lawicel/SLCAN
 

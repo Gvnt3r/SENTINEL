@@ -166,7 +166,8 @@ L’état courant et la checklist de reprise sont disponibles dans le document [
 - ajouter ISO-TP et UDS ;
 - intégrer un décodage DBC simplifié ;
 - organiser les captures par véhicule et dossier d’audit ;
-- poursuivre la séparation visuelle et fonctionnelle avec Bruce.
+- poursuivre la séparation visuelle et fonctionnelle avec Bruce ;
+- évaluer des backends candidats pour les modules CAN M5Stack officiels (Unit CAN, Unit Mini CAN, Module COMMU), selon compatibilité électrique confirmée — voir [Matériel CAN et OBD-II](docs/CAN_HARDWARE.md).
 
 ## ♡ Origine, crédits et licence
 
