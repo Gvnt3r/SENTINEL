@@ -6,6 +6,8 @@ SENTINEL sépare trois usages : capture CAN autonome sur le Stick, diagnostic OB
 
 Le backend `TWAI` utilise le contrôleur CAN classique intégré à l’ESP32. Il nécessite obligatoirement un **transceiver CAN 3,3 V** externe, idéalement isolé galvaniquement. Le firmware démarre en écoute seule et n’autorise l’émission qu’après un appui physique prolongé pour la session en cours.
 
+Pour le banc de validation v0.1-beta, le composant retenu est un **TI VP230 / SN65HVD230** alimenté en 3,3 V. Les NXP TJA1050/TJA1050C disponibles sont des composants 5 V et ne doivent pas être raccordés directement à l’entrée RX du Stick sans adaptation de niveaux. Le module MCP2515 disponible communique en SPI : il peut servir de nœud CAN de test indépendant, mais n’est pas le transceiver du backend TWAI actuel.
+
 | M5StickC Plus2 | Transceiver CAN |
 |---|---|
 | GPIO32 | TXD |

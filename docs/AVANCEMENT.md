@@ -1,6 +1,6 @@
 # Avancement S¢ntïnel v0.1-beta
 
-Dernière mise à jour : 16 août 2026  
+Dernière mise à jour : 17 août 2026
 Branche de travail : `sentinel`  
 État : **développement et audit logiciel terminés — validation matérielle requise avant release**
 
@@ -45,6 +45,30 @@ Branche de travail : `sentinel`
 - [ ] mettre à jour le rapport d’audit avec les résultats ;
 - [ ] créer le tag `v0.1-beta` et la release GitHub avec le binaire et son SHA-256.
 
+## Matériel disponible pour la validation CAN
+
+| Matériel | Décision | Utilisation prévue |
+|---|---|---|
+| TI `VP230` / SN65HVD230 | **retenu** | transceiver 3,3 V entre GPIO32/33 et CANH/CANL |
+| module MCP2515 + transceiver | disponible | nœud CAN actif indépendant pour générer ou acquitter du trafic |
+| NXP TJA1050 / TJA1050C | écarté en direct | composant 5 V nécessitant alimentation et adaptation de niveaux |
+
+### Montage retenu
+
+| M5StickC Plus2 | VP230 |
+|---|---|
+| GPIO32 | `D`, `TXD` ou `CTX` |
+| GPIO33 | `R`, `RXD` ou `CRX` |
+| 3V3 | `VCC` |
+| GND | `GND` |
+| bus CAN | `CANH` et `CANL` |
+
+- ajouter un condensateur de découplage de 100 nF entre VCC et GND si le module n’en possède pas ;
+- placer `Rs` à GND pour le premier essai haute vitesse, ou utiliser une résistance de contrôle de pente adaptée ;
+- vérifier les résistances de terminaison hors tension : environ 60 Ω entre CANH et CANL pour deux terminaisons de 120 Ω ;
+- ne pas relier directement un TJA1050 alimenté en 5 V au GPIO33 ;
+- effectuer le premier essai uniquement sur un banc isolé, jamais sur un véhicule en circulation.
+
 ## Risques connus acceptés pour la bêta
 
 - WebUI en HTTP : utilisation limitée à un réseau local ou point d’accès de confiance ;
@@ -55,9 +79,11 @@ Branche de travail : `sentinel`
 
 ## Reprise recommandée
 
-1. Brancher le M5StickC Plus2 déjà flashé.
-2. Réaliser le test WebUI et noter le résultat.
-3. Réaliser le test CAN sur banc isolé, d’abord sans TX.
-4. Valider une capture et un replay contrôlé.
-5. Fermer les deux dernières cases du rapport de sécurité.
-6. Publier seulement ensuite `v0.1-beta`.
+1. Contrôler visuellement le module VP230 et la présence éventuelle d’une terminaison 120 Ω.
+2. Monter le VP230 sur un banc CAN isolé avec au moins deux nœuds actifs pour acquitter les trames.
+3. Brancher le M5StickC Plus2 déjà flashé et sélectionner le backend TWAI.
+4. Réaliser le test WebUI et noter le résultat.
+5. Réaliser le test CAN d’abord en écoute seule, puis valider une capture ASC.
+6. Tester un replay contrôlé après déverrouillage physique du TX.
+7. Fermer les deux dernières cases du rapport de sécurité.
+8. Publier seulement ensuite `v0.1-beta`.
