@@ -2,6 +2,8 @@
 
 SENTINEL sépare trois usages : capture CAN autonome sur le Stick, diagnostic OBD-II et analyse approfondie sur ordinateur.
 
+> **Indispensable vs remplaçable —** ce qui est requis, c’est la fonction : un transceiver 3,3 V (idéalement isolé) pour le backend TWAI, ou un adaptateur SLCAN 3,3 V ; un second nœud CAN actif sur le banc de test ; une terminaison 120 Ω à chaque extrémité du bus. Les références précises citées ici (VP230, MCP2515, SparkFun CAN-Bus Shield…) sont des exemples qui fonctionnent, pas des exigences de marque — tout composant équivalent respectant la même tension logique et la même fonction convient. Le détail du banc précis de l’auteur, avec son historique de bricolage, est journalisé dans [Avancement v0.1-beta](AVANCEMENT.md) ; ce document-ci reste la référence générique.
+
 ## 1. Capture autonome recommandée : ESP32 TWAI
 
 Le backend `TWAI` utilise le contrôleur CAN classique intégré à l’ESP32. Il nécessite obligatoirement un **transceiver CAN 3,3 V** externe, idéalement isolé galvaniquement. Le firmware démarre en écoute seule et n’autorise l’émission qu’après un appui physique prolongé pour la session en cours.
